@@ -7,18 +7,14 @@ import tqdm
 from torch.utils.data import Dataset, DataLoader
 
 # Constants
-TIMESTEP_HOURS = 3
-SEQ_LEN_INPUT = 24
-SEQ_LEN_OUTPUT = 24
-
 DATA_DIR = "data/era5/"
 OUTPUT_DIR = "data/processed/"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-TRAIN_YEARS = list(range(1990, 2010))
+TRAIN_YEARS = list(range(1979, 2010))
 VAL_YEARS = list(range(2010, 2015))
 TEST_YEARS = list(range(2015, 2024))
 
-ALL_YEARS = TRAIN_YEARS + VAL_YEARS + TEST_YEARS
+ALL_YEARS = range(1979, 2024)
 
 BATCH_SIZE = 16
 NUM_WORKERS = 1
@@ -44,14 +40,8 @@ def unzip_and_organize_data():
                 f"{DATA_DIR}downloaded/era5_adriatic_{year}.nc", "r"
             ) as zip_ref:
                 zip_ref.extractall(f"{DATA_DIR}unzipped/")
-            os.rename(
-                f"{DATA_DIR}unzipped/data_stream-oper.nc",
-                wind_file,
-            )
-            os.rename(
-                f"{DATA_DIR}unzipped/data_stream-wave.nc",
-                wave_file,
-            )
+            os.rename(f"{DATA_DIR}unzipped/data_stream-oper.nc", wind_file)
+            os.rename(f"{DATA_DIR}unzipped/data_stream-wave.nc", wave_file)
         except (zipfile.BadZipFile, FileNotFoundError, OSError) as e:
             print(f"Error processing data for the year {year}: {e}")
 
@@ -98,60 +88,7 @@ def load_wave_data(year):
         print(f"Key error: {e} in file {file_path}")
     except Exception as e:
         print(f"An error occurred while loading wave data for the year {year}: {e}")
-    return None, None, None
-
-
-def create_sequences(u10, v10, swh, mwp, mwd_sin, mwd_cos):
-    """
-    Creates sequences from the wind and wave data.
-    """
-    num_time_steps = u10.shape[0]
-
-    inputs = []
-    outputs = []
-
-    for t_start in range(0, num_time_steps - SEQ_LEN_INPUT - SEQ_LEN_OUTPUT + 1):
-        # Input sequence: t_start to t_start + SEQ_LEN_INPUT
-        input_seq_u = u10.isel(
-            valid_time=slice(t_start, t_start + SEQ_LEN_INPUT)
-        ).values
-        input_seq_v = v10.isel(
-            valid_time=slice(t_start, t_start + SEQ_LEN_INPUT)
-        ).values
-        input_seq = np.stack(
-            [input_seq_u, input_seq_v], axis=-1
-        )  # Shape: (SEQ_LEN_INPUT, H_wind, W_wind, 2)
-
-        # Output sequence: t_start + SEQ_LEN_INPUT to t_start + SEQ_LEN_INPUT + SEQ_LEN_OUTPUT
-        output_seq_swh = swh.isel(
-            valid_time=slice(
-                t_start + SEQ_LEN_INPUT, t_start + SEQ_LEN_INPUT + SEQ_LEN_OUTPUT
-            )
-        ).values
-        output_seq_mwp = mwp.isel(
-            valid_time=slice(
-                t_start + SEQ_LEN_INPUT, t_start + SEQ_LEN_INPUT + SEQ_LEN_OUTPUT
-            )
-        ).values
-        output_seq_mwd_sin = mwd_sin.isel(
-            valid_time=slice(
-                t_start + SEQ_LEN_INPUT, t_start + SEQ_LEN_INPUT + SEQ_LEN_OUTPUT
-            )
-        ).values
-        output_seq_mwd_cos = mwd_cos.isel(
-            valid_time=slice(
-                t_start + SEQ_LEN_INPUT, t_start + SEQ_LEN_INPUT + SEQ_LEN_OUTPUT
-            )
-        ).values
-        output_seq = np.stack(
-            [output_seq_swh, output_seq_mwp, output_seq_mwd_sin, output_seq_mwd_cos],
-            axis=-1,
-        )  # Shape: (SEQ_LEN_OUTPUT, H_wave, W_wave, 4)
-
-        inputs.append(input_seq)
-        outputs.append(output_seq)
-
-    return np.array(inputs), np.array(outputs)
+    return None, None, None, None
 
 
 def process_year(year):
@@ -170,54 +107,44 @@ def process_year(year):
     ):
         raise ValueError(f"Data not found for year {year}")
 
-    return create_sequences(u10, v10, swh, mwp, mwd_sin, mwd_cos)
+    inputs = np.stack([u10.values, v10.values], axis=-1)
+    outputs = np.stack(
+        [swh.values, mwp.values, mwd_sin.values, mwd_cos.values], axis=-1
+    )
+
+    # Print the largest mwp value in the dataset but habndle nan values
+    mwp = mwp.where(~np.isnan(mwp), -100)
+    print(f"Max mean wave period: {np.max(mwp.values)}")
+
+    return inputs, outputs
 
 
 class WindWaveDataset(Dataset):
     """
     Custom PyTorch dataset for wind and wave data.
-
-    Args:
-
-    inputs (np.ndarray): Input sequences of wind data. Shape: (num_samples, SEQ_LEN_INPUT, H_wind, W_wind, 2)
-    outputs (np.ndarray): Output sequences of wave data. Shape: (num_samples, SEQ_LEN_OUTPUT, H_wave, W_wave, 4)
-    transform (callable, optional): Optional transform to be applied on a sample
-
-    Returns:
-
-    Tuple: Tuple of input and output sequences
     """
 
     def __init__(self, inputs, outputs, transform=None):
-        self.inputs = inputs  # Shape: (num_samples, SEQ_LEN_INPUT, H_wind, W_wind, 2)
-        self.outputs = (
-            outputs  # Shape: (num_samples, SEQ_LEN_OUTPUT, H_wave, W_wave, 4)
-        )
+        self.inputs = inputs
+        self.outputs = outputs
         self.transform = transform
 
     def __len__(self):
         return len(self.inputs)
 
     def __getitem__(self, idx):
-        input_seq = self.inputs[idx]
-        output_seq = self.outputs[idx]
+        input_data = self.inputs[idx]
+        output_data = self.outputs[idx]
 
         if self.transform:
-            input_seq, output_seq = self.transform(input_seq, output_seq)
+            input_data, output_data = self.transform(input_data, output_data)
 
-        return input_seq, output_seq
+        return input_data, output_data
 
 
 class NormalizeTransform:
     """
-    Normalizes the input and output sequences.
-
-    Args:
-
-    input_means (np.ndarray): Mean values for each channel in the input sequences
-    input_stds (np.ndarray): Standard deviation values for each channel in the input sequences
-    output_means (np.ndarray): Mean values for each channel in the output sequences
-    output_stds (np.ndarray): Standard deviation values for each channel in the output sequences
+    Normalizes the input and output data.
     """
 
     def __init__(self, input_means, input_stds, output_means, output_stds):
@@ -226,10 +153,10 @@ class NormalizeTransform:
         self.output_means = output_means
         self.output_stds = output_stds
 
-    def __call__(self, input_seq, output_seq):
-        input_seq = (input_seq - self.input_means) / self.input_stds
-        output_seq = (output_seq - self.output_means) / self.output_stds
-        return input_seq, output_seq
+    def __call__(self, input_data, output_data):
+        input_data = (input_data - self.input_means) / self.input_stds
+        output_data = (output_data - self.output_means) / self.output_stds
+        return input_data, output_data
 
 
 def main():
@@ -272,7 +199,7 @@ def main():
     test_inputs = np.concatenate(test_input_list, axis=0)
     test_outputs = np.concatenate(test_output_list, axis=0)
 
-    # Normalize the input and output sequences
+    # Normalize the input and output data
     input_flat = train_inputs.reshape(-1, 2)
     input_means = input_flat.mean(axis=0)
     input_stds = input_flat.std(axis=0)

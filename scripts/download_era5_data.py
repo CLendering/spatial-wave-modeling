@@ -6,7 +6,7 @@ import time
 OUTPUT_DIR = "data/era5/"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-START_YEAR = 1979
+START_YEAR = 1980
 END_YEAR = 2023
 
 c = cdsapi.Client()

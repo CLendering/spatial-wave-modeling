@@ -151,8 +151,8 @@ class UNet(nn.Module):
 
     def __init__(
         self,
-        in_ch,
-        out_ch,
+        in_ch=2,
+        out_ch=4,
         num_filters=[64, 128, 256, 512],
         kernel_size=3,
         stride=1,
@@ -164,19 +164,46 @@ class UNet(nn.Module):
         self.decoder = Decoder(num_filters, kernel_size, stride, padding)
         self.final_conv = nn.Conv2d(num_filters[0], out_ch, kernel_size=1)
 
+        # Additional activation functions
+        self.sigmoid = nn.Sigmoid()
+        self.tanh = nn.Tanh()
+        # Additional conv layer to adjust output dimensions
+        self.adjust_dims = nn.Conv2d(out_ch, out_ch, kernel_size=3, stride=2, padding=1)
+
     def forward(self, x):
         x, skip_connections = self.encoder(x)
         x = self.bottleneck(x)
         x = self.decoder(x, skip_connections)
         x = self.final_conv(x)
-        return x
+        x = self.adjust_dims(x)
+
+        # Now x has shape [batch_size, out_ch, H', W']
+        # Split the outputs
+        swh_mwp_outputs = x[:, :2, :, :]  # First two channels for SWH and MWP
+        mwd_outputs = x[:, 2:, :, :]  # Last two channels for MWD sine and cosine
+
+        # Apply activation functions
+        swh_mwp_outputs = self.sigmoid(swh_mwp_outputs)  # Outputs in [0, 1]
+        mwd_outputs = self.tanh(mwd_outputs)  # Outputs in [-1, 1]
+
+        # Concatenate outputs back together
+        outputs = torch.cat((swh_mwp_outputs, mwd_outputs), dim=1)
+        return outputs
 
 
 def test():
-    x = torch.randn((3, 1, 160, 160))
-    model = UNet(1, 1)
+    # Test with the specific input and output dimensions
+    x = torch.randn((1, 2, 25, 33))  # Batch size 1, 2 channels (u and v), 25x33 grid
+    model = UNet()
     preds = model(x)
-    assert preds.shape == x.shape
+    print(f"Input shape: {x.shape}")
+    print(f"Output shape: {preds.shape}")
+    assert preds.shape == (
+        1,
+        4,
+        13,
+        17,
+    ), f"Expected shape (1, 4, 13, 17), got {preds.shape}"
     print("UNet test passed!")
 
 
